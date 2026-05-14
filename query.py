@@ -28,13 +28,37 @@ def _retrieve(query_vec: list[float], corpus: str, k: int) -> list[dict]:
     )
     docs = result["documents"][0]
     metas = result["metadatas"][0]
-    return [{"text": d, "source_title": m["source_title"]} for d, m in zip(docs, metas)]
+    return [
+        {
+            "text": d,
+            "source_title": m["source_title"],
+            "genes_proteins": m.get("genes_proteins") or [],
+            "methods": m.get("methods") or [],
+            "concepts": m.get("concepts") or [],
+        }
+        for d, m in zip(docs, metas)
+    ]
+
+
+def _entity_tags(chunk: dict) -> str:
+    parts: list[str] = []
+    for key, label in (("genes_proteins", "Genes"), ("methods", "Methods"), ("concepts", "Concepts")):
+        items = chunk.get(key) or []
+        if items:
+            parts.append(f"[{label}: {', '.join(items)}]")
+    return " ".join(parts)
 
 
 def _format_group(label: str, chunks: list[dict]) -> str:
     if not chunks:
         return f"[{label}]\n(no relevant passages)\n"
-    blocks = [f"<<source: {c['source_title']}>>\n{c['text']}" for c in chunks]
+    blocks = []
+    for c in chunks:
+        header = f"<<source: {c['source_title']}>>"
+        tags = _entity_tags(c)
+        if tags:
+            header += " " + tags
+        blocks.append(f"{header}\n{c['text']}")
     return f"[{label}]\n" + "\n\n".join(blocks) + "\n"
 
 

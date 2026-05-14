@@ -1,6 +1,5 @@
 import json
 import os
-import re
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -54,23 +53,15 @@ Before responding, self-check: for each item in "genes_proteins" and "methods", 
 Return only the JSON object. No prose, no markdown fences."""
 
 
-_EMPTY_EXTRACTION = {"genes_proteins": [], "methods": [], "concepts": []}
-
-
-def _parse_json_object(raw: str) -> dict | None:
-    # Tolerate ```json fences and surrounding whitespace/prose.
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
-    if fenced:
-        raw = fenced.group(1)
-    else:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end > start:
-            raw = raw[start : end + 1]
+def _parse_extraction(raw: str) -> dict:
+    start, end = raw.find("{"), raw.rfind("}")
+    if start == -1 or end <= start:
+        return {}
     try:
-        return json.loads(raw)
+        result = json.loads(raw[start : end + 1])
     except json.JSONDecodeError:
-        return None
+        return {}
+    return result if isinstance(result, dict) else {}
 
 
 def extract_entities(text: str) -> dict[str, list[str]]:
@@ -84,9 +75,9 @@ def extract_entities(text: str) -> dict[str, list[str]]:
         ],
     )
     raw = response.choices[0].message.content or ""
-    parsed = _parse_json_object(raw)
+    parsed = _parse_extraction(raw)
     if not isinstance(parsed, dict):
-        return dict(_EMPTY_EXTRACTION)
+        return {"genes_proteins": [], "methods": [], "concepts": []}
     out: dict[str, list[str]] = {}
     for key in ("genes_proteins", "methods", "concepts"):
         value = parsed.get(key, [])
