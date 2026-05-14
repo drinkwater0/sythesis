@@ -1,96 +1,176 @@
 import hashlib
-import json
+import re
 from pathlib import Path
 
 import chromadb
-from pypdf import PdfReader
+from chromadb.api.types import Metadata
+from docling.document_converter import DocumentConverter
 
 import embeddings
-import llm
 from config import ALL_CORPORA, CHROMA_COLLECTION, CHROMA_PATH
 
 _client = chromadb.PersistentClient(path=CHROMA_PATH)
 _collection = _client.get_or_create_collection(name=CHROMA_COLLECTION)
 
-
-CHUNKER_SYSTEM = """You are a chunking assistant for a biomedical research corpus.
-
-Your task: split the article into semantically coherent passages of verbatim text, and tag each with the corpus it belongs to.
-
-Each passage should:
-- Be a contiguous, verbatim span from the original text (no paraphrasing, no summarization).
-- Cover one self-contained finding, method, or argument.
-- Be roughly 150-300 words. Coherence matters more than exact length.
-- Skip headers, page footers, references, and figure captions unless they carry substantive content.
-
-Corpus tagging:
-- Available corpora: {corpora}.
-- Use the corpus name that best fits the passage's topic.
-- If a passage is generic introductory material or doesn't fit any corpus, tag corpus as null.
-- A single article may produce chunks tagged with different corpora if it spans topics.
-
-Return ONLY valid JSON (no markdown fence, no commentary) with this shape:
-{{
-  "source_title": "<the article's title>",
-  "chunks": [
-    {{"text": "<verbatim passage>", "corpus": "<corpus name or null>"}}
-  ]
-}}
-"""
+_converter: DocumentConverter | None = None
 
 
-def _load_text(path: Path) -> str:
+def _get_converter() -> DocumentConverter:
+    global _converter
+    if _converter is None:
+        _converter = DocumentConverter()
+    return _converter
+
+
+# Section headings that aren't substantive content — skip these and everything under them.
+_SKIP_HEADINGS = (
+    "references",
+    "bibliography",
+    "acknowledg",
+    "supplementary",
+    "funding",
+    "author contributions",
+    "competing interests",
+    "conflict of interest",
+    "appendix",
+    "data availability",
+)
+
+
+_FIGURE_CAPTION_RE = re.compile(r"^\s*(figure|fig\.?)\s*\d", re.IGNORECASE)
+
+
+def _extract_figure_captions(doc) -> list[str]:
+    # Docling extracts captions inconsistently across publishers — keep only entries
+    # that actually start like a figure caption to avoid injecting body-text bleed.
+    captions: list[str] = []
+    for pic in doc.pictures:
+        parts: list[str] = []
+        for ref in (pic.captions or []):
+            try:
+                target = ref.resolve(doc)
+            except Exception:
+                target = None
+            if target is not None and getattr(target, "text", None):
+                parts.append(target.text)
+        text = " ".join(parts).strip()
+        if text and _FIGURE_CAPTION_RE.match(text):
+            captions.append(text)
+    return captions
+
+
+def _load_document(path: Path) -> tuple[str, list[str]]:
     if path.suffix.lower() == ".pdf":
-        reader = PdfReader(str(path))
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
-    return path.read_text(encoding="utf-8")
+        result = _get_converter().convert(str(path))
+        doc = result.document
+        body = doc.export_to_markdown().replace("<!-- image -->", "")
+        return body, _extract_figure_captions(doc)
+    return path.read_text(encoding="utf-8"), []
 
 
-def _parse_json(text: str) -> dict:
-    # LLMs sometimes wrap JSON in ```json ... ``` despite instructions.
-    text = text.strip()
-    if text.startswith("```"):
-        parts = text.split("```")
-        if len(parts) >= 3:
-            text = parts[1].lstrip()
-            if text.startswith("json"):
-                text = text[4:].lstrip()
-    return json.loads(text)
+def _corpus_from_path(path: Path) -> str:
+    corpus = path.parent.name
+    if corpus not in ALL_CORPORA:
+        raise ValueError(
+            f"{path} must live under one of {ALL_CORPORA}; found '{corpus}'"
+        )
+    return corpus
+
+
+def _extract_title(markdown: str, fallback: str) -> str:
+    for line in markdown.split("\n"):
+        if line.startswith("# "):
+            return line[2:].strip()
+    return fallback
+
+
+def _split_sections(markdown: str) -> list[tuple[str, str]]:
+    # Split on level-2 headers. Content before the first ## is a "preamble" section.
+    sections: list[tuple[str, list[str]]] = [("", [])]
+    for line in markdown.split("\n"):
+        if line.startswith("## "):
+            sections.append((line[3:].strip(), []))
+        else:
+            sections[-1][1].append(line)
+    return [(h, "\n".join(body).strip()) for h, body in sections if "\n".join(body).strip()]
+
+
+def _should_skip(heading: str) -> bool:
+    h = heading.lower()
+    return any(p in h for p in _SKIP_HEADINGS)
+
+
+def _pack_paragraphs(text: str, target_chars: int) -> list[str]:
+    # Greedily pack paragraphs into chunks <= target_chars; never split mid-paragraph.
+    chunks: list[str] = []
+    buf: list[str] = []
+    buf_len = 0
+    for para in text.split("\n\n"):
+        para = para.strip()
+        if not para:
+            continue
+        para_len = len(para) + 2
+        if buf and buf_len + para_len > target_chars:
+            chunks.append("\n\n".join(buf))
+            buf, buf_len = [], 0
+        buf.append(para)
+        buf_len += para_len
+    if buf:
+        chunks.append("\n\n".join(buf))
+    return chunks
 
 
 def _chunk_id(source_path: str, text: str) -> str:
     return hashlib.sha1(f"{source_path}::{text}".encode("utf-8")).hexdigest()[:16]
 
 
-def ingest(path: str | Path) -> dict:
+def ingest(path: str | Path, target_chars: int = 1500) -> dict:
     path = Path(path)
-    article_text = _load_text(path)
+    corpus = _corpus_from_path(path)
+    article_text, figure_captions = _load_document(path)
+    source_title = _extract_title(article_text, path.stem)
 
-    system = CHUNKER_SYSTEM.format(corpora=ALL_CORPORA)
-    response = llm.complete(prompt=article_text, system=system)
-    parsed = _parse_json(response)
-
-    source_title = parsed.get("source_title") or path.stem
-    chunks = [c for c in parsed["chunks"] if c.get("corpus") in ALL_CORPORA]
+    chunks: list[tuple[str, str]] = []
+    for heading, body in _split_sections(article_text):
+        if _should_skip(heading):
+            continue
+        for t in _pack_paragraphs(body, target_chars=target_chars):
+            chunks.append(("text", t))
+    chunks.extend(("figure_caption", c) for c in figure_captions)
 
     if not chunks:
-        return {"source_title": source_title, "ingested": 0, "skipped": len(parsed["chunks"])}
+        return {"source_title": source_title, "corpus": corpus, "ingested": 0}
 
     # Idempotency: drop any prior chunks from this source before re-adding.
     _collection.delete(where={"source_path": str(path)})
 
-    texts = [c["text"] for c in chunks]
-    ids = [_chunk_id(str(path), t) for t in texts]
-    metadatas = [
-        {"corpus": c["corpus"], "source_title": source_title, "source_path": str(path)}
-        for c in chunks
-    ]
-    vectors = embeddings.embed_documents(texts)
+    # Dedupe by id: a caption may also live inline in the body markdown.
+    seen: set[str] = set()
+    ids: list[str] = []
+    texts: list[str] = []
+    metadatas: list[Metadata] = []
+    by_type: dict[str, int] = {}
+    for ctype, text in chunks:
+        cid = _chunk_id(str(path), text)
+        if cid in seen:
+            continue
+        seen.add(cid)
+        ids.append(cid)
+        texts.append(text)
+        metadatas.append({
+            "corpus": corpus,
+            "source_title": source_title,
+            "source_path": str(path),
+            "type": ctype,
+        })
+        by_type[ctype] = by_type.get(ctype, 0) + 1
 
+    vectors = embeddings.embed_documents(texts)
     _collection.add(ids=ids, documents=texts, embeddings=vectors, metadatas=metadatas)
 
     return {
         "source_title": source_title,
-        "ingested": len(chunks),
-        "skipped": len(parsed["chunks"]) - len(chunks),
+        "corpus": corpus,
+        "ingested": len(texts),
+        "by_type": by_type,
     }

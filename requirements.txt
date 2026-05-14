@@ -3,4 +3,4 @@ chromadb
 sentence-transformers
 jupyter
 python-dotenv
-pypdf
+docling

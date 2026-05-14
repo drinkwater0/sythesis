@@ -26,8 +26,14 @@ def complete(prompt: str, system: str | None = None) -> str:
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
-    response = _get_client().chat.completions.create(
+    stream = _get_client().chat.completions.create(
         model=LLM_MODEL,
         messages=messages,
+        stream=True,
     )
-    return response.choices[0].message.content
+    parts: list[str] = []
+    for event in stream:
+        delta = event.choices[0].delta.content if event.choices else None
+        if delta:
+            parts.append(delta)
+    return "".join(parts)
