@@ -1,4 +1,6 @@
+import json
 import os
+import re
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -37,3 +39,56 @@ def complete(prompt: str, system: str | None = None) -> str:
         if delta:
             parts.append(delta)
     return "".join(parts)
+
+
+_EXTRACT_SYSTEM = """You extract structured metadata from passages of biomedical research papers.
+
+Return a JSON object with exactly these three keys, each a list of strings (empty list [] if nothing applies):
+
+- "genes_proteins": gene or protein names mentioned in the passage (e.g. "LMNA", "YAP", "Oct4"). Use the canonical symbol. Only include items that appear literally in the passage text.
+- "methods": experimental techniques, assays, or computational tools mentioned (e.g. "ChIP-seq", "lentiviral knockdown", "quantitative PCR"). Only items appearing in the passage text.
+- "concepts": 2 to 5 short noun phrases (1-4 words each) capturing the topical focus of the passage (e.g. "stem cell pluripotency", "nuclear envelope assembly"). These may paraphrase the text.
+
+Before responding, self-check: for each item in "genes_proteins" and "methods", confirm it appears literally in the passage. Drop any that do not.
+
+Return only the JSON object. No prose, no markdown fences."""
+
+
+_EMPTY_EXTRACTION = {"genes_proteins": [], "methods": [], "concepts": []}
+
+
+def _parse_json_object(raw: str) -> dict | None:
+    # Tolerate ```json fences and surrounding whitespace/prose.
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+    if fenced:
+        raw = fenced.group(1)
+    else:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end > start:
+            raw = raw[start : end + 1]
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def extract_entities(text: str) -> dict[str, list[str]]:
+    """Returns {'genes_proteins': [...], 'methods': [...], 'concepts': [...]}.
+    Falls back to empty lists if the model returns unparseable output."""
+    response = _get_client().chat.completions.create(
+        model=LLM_MODEL,
+        messages=[
+            {"role": "system", "content": _EXTRACT_SYSTEM},
+            {"role": "user", "content": text},
+        ],
+    )
+    raw = response.choices[0].message.content or ""
+    parsed = _parse_json_object(raw)
+    if not isinstance(parsed, dict):
+        return dict(_EMPTY_EXTRACTION)
+    out: dict[str, list[str]] = {}
+    for key in ("genes_proteins", "methods", "concepts"):
+        value = parsed.get(key, [])
+        out[key] = [str(v) for v in value if isinstance(v, (str, int, float))] if isinstance(value, list) else []
+    return out

@@ -7,7 +7,10 @@ from chromadb.api.types import Metadata
 from docling.document_converter import DocumentConverter
 
 import embeddings
+import llm
 from config import ALL_CORPORA, CHROMA_COLLECTION, CHROMA_PATH
+
+_PARSED_DIR = Path(__file__).parent / "data" / "parsed"
 
 _client = chromadb.PersistentClient(path=CHROMA_PATH)
 _collection = _client.get_or_create_collection(name=CHROMA_COLLECTION)
@@ -59,13 +62,32 @@ def _extract_figure_captions(doc) -> list[str]:
     return captions
 
 
-def _load_document(path: Path) -> tuple[str, list[str]]:
-    if path.suffix.lower() == ".pdf":
-        result = _get_converter().convert(str(path))
-        doc = result.document
-        body = doc.export_to_markdown().replace("<!-- image -->", "")
-        return body, _extract_figure_captions(doc)
-    return path.read_text(encoding="utf-8"), []
+def _cache_path(pdf: Path) -> Path:
+    # Don't use with_suffix — pdf.stem may contain dots (e.g. "Genes Dev.-2010-...")
+    # and with_suffix would strip everything after the first dot.
+    return _PARSED_DIR / pdf.parent.name / f"{pdf.stem}.md"
+
+
+def _load_document(path: Path) -> tuple[str, bool]:
+    """Returns (body_markdown, cached). Figure captions, if any, are appended
+    to the markdown under a trailing '## Figure captions' section."""
+    if path.suffix.lower() != ".pdf":
+        return path.read_text(encoding="utf-8"), False
+
+    md_path = _cache_path(path)
+    if md_path.exists() and md_path.stat().st_mtime >= path.stat().st_mtime:
+        return md_path.read_text(encoding="utf-8"), True
+
+    result = _get_converter().convert(str(path))
+    doc = result.document
+    body = doc.export_to_markdown().replace("<!-- image -->", "")
+    captions = _extract_figure_captions(doc)
+    if captions:
+        body = body.rstrip() + "\n\n## Figure captions\n\n" + "\n\n".join(captions) + "\n"
+
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text(body, encoding="utf-8")
+    return body, False
 
 
 def _corpus_from_path(path: Path) -> str:
@@ -124,53 +146,63 @@ def _chunk_id(source_path: str, text: str) -> str:
     return hashlib.sha1(f"{source_path}::{text}".encode("utf-8")).hexdigest()[:16]
 
 
-def ingest(path: str | Path, target_chars: int = 1500) -> dict:
+def ingest(path: str | Path, target_chars: int = 2000) -> dict:
     path = Path(path)
     corpus = _corpus_from_path(path)
-    article_text, figure_captions = _load_document(path)
+    article_text, cached = _load_document(path)
     source_title = _extract_title(article_text, path.stem)
 
-    chunks: list[tuple[str, str]] = []
+    texts: list[str] = []
     for heading, body in _split_sections(article_text):
         if _should_skip(heading):
             continue
-        for t in _pack_paragraphs(body, target_chars=target_chars):
-            chunks.append(("text", t))
-    chunks.extend(("figure_caption", c) for c in figure_captions)
+        texts.extend(_pack_paragraphs(body, target_chars=target_chars))
 
-    if not chunks:
-        return {"source_title": source_title, "corpus": corpus, "ingested": 0}
+    if not texts:
+        return {"source_title": source_title, "corpus": corpus, "ingested": 0, "cached": cached}
 
     # Idempotency: drop any prior chunks from this source before re-adding.
     _collection.delete(where={"source_path": str(path)})
 
-    # Dedupe by id: a caption may also live inline in the body markdown.
+    # Dedupe by id: a caption may appear both inline in the body and in the
+    # trailing "## Figure captions" section.
     seen: set[str] = set()
     ids: list[str] = []
-    texts: list[str] = []
-    metadatas: list[Metadata] = []
-    by_type: dict[str, int] = {}
-    for ctype, text in chunks:
-        cid = _chunk_id(str(path), text)
+    unique_texts: list[str] = []
+    for t in texts:
+        cid = _chunk_id(str(path), t)
         if cid in seen:
             continue
         seen.add(cid)
         ids.append(cid)
-        texts.append(text)
-        metadatas.append({
+        unique_texts.append(t)
+
+    print(f"[ingest] {path.name}: extracting entities for {len(unique_texts)} chunks...")
+    extractions: list[dict[str, list[str]]] = []
+    for i, t in enumerate(unique_texts, 1):
+        try:
+            extractions.append(llm.extract_entities(t))
+        except Exception as e:
+            print(f"  [{i}/{len(unique_texts)}] extraction failed: {type(e).__name__}: {e}")
+            extractions.append({"genes_proteins": [], "methods": [], "concepts": []})
+
+    metadatas: list[Metadata] = [
+        {
             "corpus": corpus,
             "source_title": source_title,
             "source_path": str(path),
-            "type": ctype,
-        })
-        by_type[ctype] = by_type.get(ctype, 0) + 1
-
-    vectors = embeddings.embed_documents(texts)
-    _collection.add(ids=ids, documents=texts, embeddings=vectors, metadatas=metadatas)
+            "genes_proteins": e["genes_proteins"],
+            "methods": e["methods"],
+            "concepts": e["concepts"],
+        }
+        for e in extractions
+    ]
+    vectors = embeddings.embed_documents(unique_texts)
+    _collection.add(ids=ids, documents=unique_texts, embeddings=vectors, metadatas=metadatas)
 
     return {
         "source_title": source_title,
         "corpus": corpus,
-        "ingested": len(texts),
-        "by_type": by_type,
+        "ingested": len(unique_texts),
+        "cached": cached,
     }
