@@ -42,11 +42,12 @@ def complete(prompt: str, system: str | None = None) -> str:
 
 _EXTRACT_SYSTEM = """You extract structured metadata from passages of biomedical research papers.
 
-Return a JSON object with exactly these three keys, each a list of strings (empty list [] if nothing applies):
+Return a JSON object with exactly these four keys:
 
-- "genes_proteins": gene or protein names mentioned in the passage (e.g. "LMNA", "YAP", "Oct4"). Use the canonical symbol. Only include items that appear literally in the passage text.
-- "methods": experimental techniques, assays, or computational tools mentioned (e.g. "ChIP-seq", "lentiviral knockdown", "quantitative PCR"). Only items appearing in the passage text.
-- "concepts": 2 to 5 short noun phrases (1-4 words each) capturing the topical focus of the passage (e.g. "stem cell pluripotency", "nuclear envelope assembly"). These may paraphrase the text.
+- "genes_proteins": list of gene or protein names mentioned in the passage (e.g. "LMNA", "YAP", "Oct4"). Use the canonical symbol. Only items appearing literally in the passage text. Empty list [] if none.
+- "methods": list of experimental techniques, assays, or computational tools mentioned (e.g. "ChIP-seq", "lentiviral knockdown", "quantitative PCR"). Only items appearing literally. Empty list [] if none.
+- "concepts": list of 2 to 5 short noun phrases (1-4 words each) capturing the topical focus (e.g. "stem cell pluripotency", "nuclear envelope assembly"). May paraphrase.
+- "skip": boolean. Set true ONLY if the passage is clearly not scientific content — an author/affiliation list, a reference/citation list, a journal running-header fragment, garbled or scrambled text, or a boilerplate metadata section (funding, author contributions, data/code availability, additional information). When in any doubt, set false. NEVER set true merely because the passage is short or terse.
 
 Before responding, self-check: for each item in "genes_proteins" and "methods", confirm it appears literally in the passage. Drop any that do not.
 
@@ -64,9 +65,9 @@ def _parse_extraction(raw: str) -> dict:
     return result if isinstance(result, dict) else {}
 
 
-def extract_entities(text: str) -> dict[str, list[str]]:
-    """Returns {'genes_proteins': [...], 'methods': [...], 'concepts': [...]}.
-    Falls back to empty lists if the model returns unparseable output."""
+def extract_entities(text: str) -> dict:
+    """Returns {'genes_proteins': [...], 'methods': [...], 'concepts': [...], 'skip': bool}.
+    Falls back to empty lists / skip=False if the model returns unparseable output."""
     response = _get_client().chat.completions.create(
         model=LLM_MODEL,
         messages=[
@@ -77,9 +78,7 @@ def extract_entities(text: str) -> dict[str, list[str]]:
     )
     raw = response.choices[0].message.content or ""
     parsed = _parse_extraction(raw)
-    if not isinstance(parsed, dict):
-        return {"genes_proteins": [], "methods": [], "concepts": []}
-    out: dict[str, list[str]] = {}
+    out: dict = {"skip": bool(parsed.get("skip"))}
     for key in ("genes_proteins", "methods", "concepts"):
         value = parsed.get(key, [])
         out[key] = [str(v) for v in value if isinstance(v, (str, int, float))] if isinstance(value, list) else []

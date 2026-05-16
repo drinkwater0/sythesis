@@ -178,13 +178,27 @@ def ingest(path: str | Path, target_chars: int = 2000) -> dict:
         unique_texts.append(t)
 
     print(f"[ingest] {path.name}: extracting entities for {len(unique_texts)} chunks...")
-    extractions: list[dict[str, list[str]]] = []
-    for i, t in enumerate(unique_texts, 1):
+    kept_ids: list[str] = []
+    kept_texts: list[str] = []
+    extractions: list[dict] = []
+    skipped = 0
+    for i, (cid, t) in enumerate(zip(ids, unique_texts), 1):
         try:
-            extractions.append(llm.extract_entities(t))
-        except Exception as e:
-            print(f"  [{i}/{len(unique_texts)}] extraction failed: {type(e).__name__}: {e}")
-            extractions.append({"genes_proteins": [], "methods": [], "concepts": []})
+            e = llm.extract_entities(t)
+        except Exception as ex:
+            print(f"  [{i}/{len(unique_texts)}] extraction failed: {type(ex).__name__}: {ex}")
+            e = {"genes_proteins": [], "methods": [], "concepts": [], "skip": False}
+        if e["skip"]:
+            skipped += 1
+            print(f"  [skip] {t[:60]!a}")
+            continue
+        kept_ids.append(cid)
+        kept_texts.append(t)
+        extractions.append(e)
+
+    if not kept_texts:
+        return {"source_title": source_title, "corpus": corpus, "ingested": 0,
+                "skipped": skipped, "cached": cached}
 
     # Chroma rejects empty list metadata values, so only attach non-empty buckets.
     metadatas: list[Metadata] = []
@@ -198,12 +212,13 @@ def ingest(path: str | Path, target_chars: int = 2000) -> dict:
             if e[key]:
                 m[key] = e[key]
         metadatas.append(m)
-    vectors = embeddings.embed_documents(unique_texts)
-    _collection.add(ids=ids, documents=unique_texts, embeddings=vectors, metadatas=metadatas)
+    vectors = embeddings.embed_documents(kept_texts)
+    _collection.add(ids=kept_ids, documents=kept_texts, embeddings=vectors, metadatas=metadatas)
 
     return {
         "source_title": source_title,
         "corpus": corpus,
-        "ingested": len(unique_texts),
+        "ingested": len(kept_texts),
+        "skipped": skipped,
         "cached": cached,
     }
