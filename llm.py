@@ -73,6 +73,7 @@ def extract_entities(text: str) -> dict[str, list[str]]:
             {"role": "system", "content": _EXTRACT_SYSTEM},
             {"role": "user", "content": text},
         ],
+        extra_body={"think": False},  # Ollama flag; ~16x faster, extraction needs no reasoning
     )
     raw = response.choices[0].message.content or ""
     parsed = _parse_extraction(raw)
