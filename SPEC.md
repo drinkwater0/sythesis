@@ -206,3 +206,12 @@ LLM_API_KEY=...
 - `PRIMARY_CHUNKS` vs `SIDE_CHUNKS` ratio is a knob to tune. Start at 6:2:2; if side corpora dominate answers, lower side; if laminopathy answers feel narrow, lower primary.
 - The uni gateway is OpenAI-compatible, so the `openai` SDK works as-is — just override `base_url`. `LLM_MODEL` is whatever string the gateway accepts (check uni docs for the exact identifier).
 - If the gateway adds an unusual auth header or path prefix beyond standard Bearer + `/v1`, the `openai` SDK supports `default_headers=` and the `base_url` can include path segments.
+
+---
+
+## Open Items (Phase 1 follow-ups)
+
+1. **Section-aware embeddings.** Store the Docling section heading in chunk metadata; prepend `{source_title} — {section}` to the *embedded* text only (not the stored document) so retrieval gets structural signal. In the synthesis prompt, print each source title once and group its chunks under it instead of repeating `<<source>>` per chunk — lowers token cost when several chunks share a PDF.
+2. **Notebook verification.** `notebooks/demo.ipynb` holds stale empty-collection outputs; run it clean end-to-end once against the populated Chroma.
+3. **Chunk-quality spot-check.** Per paper, dump each chunk's section heading + char length + extracted entities; scan for garbage (running-header fragments, reference/author-list bleed, pervasively empty entities, tiny chunks).
+4. **Populate side corpora.** `lnp` and `bioinformatics` folders are empty; forced cross-corpus retrieval is unexercised until papers are added there.
