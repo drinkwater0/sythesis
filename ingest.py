@@ -186,17 +186,18 @@ def ingest(path: str | Path, target_chars: int = 2000) -> dict:
             print(f"  [{i}/{len(unique_texts)}] extraction failed: {type(e).__name__}: {e}")
             extractions.append({"genes_proteins": [], "methods": [], "concepts": []})
 
-    metadatas: list[Metadata] = [
-        {
+    # Chroma rejects empty list metadata values, so only attach non-empty buckets.
+    metadatas: list[Metadata] = []
+    for e in extractions:
+        m: Metadata = {
             "corpus": corpus,
             "source_title": source_title,
             "source_path": str(path),
-            "genes_proteins": e["genes_proteins"],
-            "methods": e["methods"],
-            "concepts": e["concepts"],
         }
-        for e in extractions
-    ]
+        for key in ("genes_proteins", "methods", "concepts"):
+            if e[key]:
+                m[key] = e[key]
+        metadatas.append(m)
     vectors = embeddings.embed_documents(unique_texts)
     _collection.add(ids=ids, documents=unique_texts, embeddings=vectors, metadatas=metadatas)
 
