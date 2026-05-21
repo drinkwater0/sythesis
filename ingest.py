@@ -166,6 +166,57 @@ def _chunk_id(source_path: str, text: str) -> str:
     return hashlib.sha1(f"{source_path}::{text}".encode("utf-8")).hexdigest()[:16]
 
 
+def _collect_titles(articles_dir: Path) -> dict[str, list[Path]]:
+    """Walk articles_dir, extract H1 title of each article (using the parsed-md
+    cache when available). Returns title -> list of paths sharing that title."""
+    titles: dict[str, list[Path]] = {}
+    for p in sorted(articles_dir.rglob("*")):
+        if p.suffix.lower() not in {".pdf", ".txt", ".md"}:
+            continue
+        try:
+            text, _ = _load_document(p)
+        except Exception as ex:
+            print(f"[sync] could not parse {p.name} for duplicate check: {ex}")
+            continue
+        titles.setdefault(_extract_title(text, p.stem), []).append(p)
+    return titles
+
+
+def sync(articles_dir: str | Path) -> dict:
+    """Reconcile Chroma with disk. Removes chunks whose source file is gone
+    from its recorded path (deletes + moves), then ingests anything new.
+    A move is just (old path stale) + (new path appears) — no special case.
+
+    Also warns about same-title articles living in multiple corpus folders;
+    both copies are still ingested (the user may want edge-of-topics papers
+    discoverable from both pools)."""
+    articles_dir = Path(articles_dir)
+
+    duplicates = 0
+    for title, paths in _collect_titles(articles_dir).items():
+        if len(paths) > 1:
+            rels = ", ".join(str(p.relative_to(articles_dir)) for p in paths)
+            print(f"[sync] duplicate title {title!r} in: {rels} (both will be ingested)")
+            duplicates += 1
+
+    disk = {str(p) for p in articles_dir.rglob("*")
+            if p.suffix.lower() in {".pdf", ".txt", ".md"}}
+    db = {m["source_path"] for m in _collection.get(include=["metadatas"])["metadatas"]}
+
+    stale = db - disk
+    for path in sorted(stale):
+        print(f"[sync] removing chunks for missing/moved source: {path}")
+        _collection.delete(where={"source_path": path})
+
+    added = []
+    for path in sorted(disk - db):
+        result = ingest(Path(path))
+        print(f"[sync] ingested {Path(path).name}: {result}")
+        added.append(path)
+
+    return {"removed": len(stale), "added": len(added), "duplicates": duplicates}
+
+
 def ingest(path: str | Path, target_chars: int = 2000) -> dict:
     path = Path(path)
     corpus = _corpus_from_path(path)
