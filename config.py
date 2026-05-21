@@ -1,7 +1,7 @@
 from pathlib import Path
 
 PRIMARY_CORPUS = "laminopathy"
-SIDE_CORPORA = ["lnp", "bioinformatics"]
+SIDE_CORPORA = ["lnp", "bioinformatics", "stemcell"]
 ALL_CORPORA = [PRIMARY_CORPUS, *SIDE_CORPORA]
 
 # Embedding backend: "pubmedbert" (symmetric) or "medcpt" (asymmetric article/query)

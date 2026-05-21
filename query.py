@@ -20,7 +20,7 @@ _collection = _client.get_or_create_collection(name=CHROMA_COLLECTION)
 
 SYNTHESIS_SYSTEM = """You are a biomedical research assistant specialized in laminopathies.
 Answer the user's question using only the literature passages provided, grouped by domain.
-Ground answers in the cited passages. Where the side corpora (LNP delivery, bioinformatics) suggest non-obvious connections to laminopathy, surface them as hypotheses rather than claims. Cite sources by title."""
+Ground answers in the cited passages. Where the side corpora (LNP delivery, bioinformatics, stem cell biology) suggest non-obvious connections to laminopathy, surface them as hypotheses rather than claims. Cite sources by title."""
 
 
 def _retrieve(query_vec: list[float], corpus: str, k: int,
