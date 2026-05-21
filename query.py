@@ -1,3 +1,5 @@
+from collections import Counter
+
 import chromadb
 
 import embeddings
@@ -5,6 +7,7 @@ import llm
 from config import (
     CHROMA_COLLECTION,
     CHROMA_PATH,
+    MAX_PER_SOURCE,
     PRIMARY_CHUNKS,
     PRIMARY_CORPUS,
     SIDE_CHUNKS,
@@ -20,15 +23,17 @@ Answer the user's question using only the literature passages provided, grouped 
 Ground answers in the cited passages. Where the side corpora (LNP delivery, bioinformatics) suggest non-obvious connections to laminopathy, surface them as hypotheses rather than claims. Cite sources by title."""
 
 
-def _retrieve(query_vec: list[float], corpus: str, k: int) -> list[dict]:
+def _retrieve(query_vec: list[float], corpus: str, k: int,
+              max_per_source: int = MAX_PER_SOURCE) -> list[dict]:
+    # Over-fetch, then take chunks in similarity order while capping per source so one
+    # on-topic paper can't crowd out the rest. Backfill past the cap (still in
+    # similarity order) only if too few papers exist to reach k.
     result = _collection.query(
         query_embeddings=[query_vec],
-        n_results=k,
+        n_results=k * 4,
         where={"corpus": corpus},
     )
-    docs = result["documents"][0]
-    metas = result["metadatas"][0]
-    return [
+    candidates = [
         {
             "text": d,
             "source_title": m["source_title"],
@@ -36,8 +41,22 @@ def _retrieve(query_vec: list[float], corpus: str, k: int) -> list[dict]:
             "methods": m.get("methods") or [],
             "concepts": m.get("concepts") or [],
         }
-        for d, m in zip(docs, metas)
+        for d, m in zip(result["documents"][0], result["metadatas"][0])
     ]
+
+    selected: list[dict] = []
+    overflow: list[dict] = []
+    per_source: Counter = Counter()
+    for c in candidates:
+        if per_source[c["source_title"]] < max_per_source:
+            selected.append(c)
+            per_source[c["source_title"]] += 1
+        else:
+            overflow.append(c)
+    selected = selected[:k]
+    if len(selected) < k:
+        selected += overflow[: k - len(selected)]
+    return selected
 
 
 def _entity_tags(chunk: dict) -> str:
