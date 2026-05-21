@@ -19,6 +19,11 @@ SIDE_CHUNKS = 8
 # when a corpus has too few papers to reach the quota otherwise.
 MAX_PER_SOURCE = 4
 
-# LLM via uni AI gateway (OpenAI-compatible). Value is whatever identifier
-# the gateway exposes. LLM_API_BASE and LLM_API_KEY come from .env.
-LLM_MODEL = "qwen3.6-35b"
+# Two LLM roles via an OpenAI-compatible endpoint. LLM_API_BASE / LLM_API_KEY from .env.
+INGEST_MODEL = "qwen3.6-35b"   # per-chunk entity extraction during ingestion
+SYNTH_MODEL = "qwen3.5:122b"   # answer synthesis at query time (endpoint backend)
+
+# Synthesis backend: "endpoint" -> SYNTH_MODEL via the OpenAI-compatible endpoint;
+# "claude_code" -> local Claude Code CLI (Pro subscription, no API key). Fallback
+# for when the endpoint is unavailable. Ingestion always uses the endpoint.
+SYNTH_BACKEND = "endpoint"

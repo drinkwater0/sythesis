@@ -1,10 +1,12 @@
 import json
 import os
+import shutil
+import subprocess
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from config import LLM_MODEL
+from config import INGEST_MODEL, SYNTH_MODEL, SYNTH_BACKEND
 
 load_dotenv()
 
@@ -22,13 +24,13 @@ def _get_client() -> OpenAI:
     return _client
 
 
-def complete(prompt: str, system: str | None = None) -> str:
+def _complete_endpoint(prompt: str, system: str | None) -> str:
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
     stream = _get_client().chat.completions.create(
-        model=LLM_MODEL,
+        model=SYNTH_MODEL,
         messages=messages,
         stream=True,
     )
@@ -38,6 +40,38 @@ def complete(prompt: str, system: str | None = None) -> str:
         if delta:
             parts.append(delta)
     return "".join(parts)
+
+
+def _run_claude(full: str) -> str:
+    cmd = ["cmd", "/c", "claude", "-p"] if os.name == "nt" else ["claude", "-p"]
+    proc = subprocess.run(
+        cmd, input=full, capture_output=True, text=True, encoding="utf-8", timeout=300
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"claude -p failed (exit {proc.returncode}): {proc.stderr.strip()[:300]}"
+        )
+    return proc.stdout.strip()
+
+
+def _complete_claude_code(prompt: str, system: str | None) -> str:
+    # Synthesis via the local Claude Code CLI (Pro subscription auth, no API key).
+    # Prompt goes over stdin to dodge Windows arg-length limits and shell quoting.
+    if shutil.which("claude") is None:
+        raise RuntimeError("SYNTH_BACKEND='claude_code' but the `claude` CLI is not on PATH")
+    full = f"{system}\n\n{prompt}" if system else prompt
+    out = _run_claude(full)
+    if not out:  # first headless run in a fresh env can return blank; retry once
+        out = _run_claude(full)
+    if not out:
+        raise RuntimeError("claude -p returned empty output twice")
+    return out
+
+
+def complete(prompt: str, system: str | None = None) -> str:
+    if SYNTH_BACKEND == "claude_code":
+        return _complete_claude_code(prompt, system)
+    return _complete_endpoint(prompt, system)
 
 
 _EXTRACT_SYSTEM = """You extract structured metadata from passages of biomedical research papers.
@@ -69,7 +103,7 @@ def extract_entities(text: str) -> dict:
     """Returns {'genes_proteins': [...], 'methods': [...], 'concepts': [...], 'skip': bool}.
     Falls back to empty lists / skip=False if the model returns unparseable output."""
     response = _get_client().chat.completions.create(
-        model=LLM_MODEL,
+        model=INGEST_MODEL,
         messages=[
             {"role": "system", "content": _EXTRACT_SYSTEM},
             {"role": "user", "content": text},
