@@ -4,7 +4,10 @@ from pathlib import Path
 
 import chromadb
 from chromadb.api.types import Metadata
-from docling.document_converter import DocumentConverter
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 
 import embeddings
 import llm
@@ -21,7 +24,19 @@ _converter: DocumentConverter | None = None
 def _get_converter() -> DocumentConverter:
     global _converter
     if _converter is None:
-        _converter = DocumentConverter()
+        # The default native parsing backend exhausts memory (std::bad_alloc)
+        # past ~page 16 on long PDFs, silently truncating them. Inputs are
+        # born-digital (no scans), so the lightweight PyPdfium backend parses
+        # the full document with identical section structure, and OCR is
+        # unnecessary. The layout model still detects section headings.
+        opts = PdfPipelineOptions(do_ocr=False)
+        _converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(
+                    pipeline_options=opts, backend=PyPdfiumDocumentBackend
+                )
+            }
+        )
     return _converter
 
 
@@ -100,7 +115,12 @@ def _corpus_from_path(path: Path) -> str:
 
 
 def _extract_title(markdown: str, fallback: str) -> str:
+    # A real H1 title lives in the preamble (before the first ## section).
+    # Stop at the first ## so we don't pick up code-block/shebang lines that
+    # Docling mis-renders as '# ' headings deeper in the document.
     for line in markdown.split("\n"):
+        if line.startswith("## "):
+            break
         if line.startswith("# "):
             return line[2:].strip()
     return fallback
